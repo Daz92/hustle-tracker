@@ -63,7 +63,8 @@ async fn main() -> Result<()> {
         }
     };
     log::info!("Connecting to database...");
-    log::info!("Database URL: {}", settings.database_url);
+    // Never log settings.database_url: it embeds POSTGRES_PASSWORD in clear text
+    // and would write the credential into daemon.log on every start.
     log::info!("Environment variables loaded: POSTGRES_USERNAME={}, POSTGRES_PASSWORD=***",
                env::var("POSTGRES_USERNAME").unwrap_or_else(|_| "NOT_SET".to_string()));
     let database = match Database::new(&settings.database_url).await {
