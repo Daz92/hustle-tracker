@@ -1,7 +1,10 @@
-use anyhow::Result;
-use sqlx::postgres::PgPool;
-use sqlx::PgPool as Pool;
 use crate::models::session::Session;
+use anyhow::Result;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::PgPool;
+use sqlx::{PgPool as Pool, Postgres};
+
+const WRITER_LOCK_KEY: i64 = 0x485553544C455452;
 
 struct EmbeddedMigration {
     version: i64,
@@ -39,15 +42,37 @@ const MIGRATIONS: &[EmbeddedMigration] = &[
 
 pub struct Database {
     pool: Pool,
+    // Holding this connection keeps the session-level advisory lock alive.
+    // PostgreSQL releases the lock automatically when the connection closes.
+    _writer_lock: Option<PoolConnection<Postgres>>,
+    is_writer: bool,
 }
 
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
         let pool = PgPool::connect(database_url).await?;
 
-        Self::run_migrations(&pool).await?;
+        let mut lock_connection = pool.acquire().await?;
+        let is_writer: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(WRITER_LOCK_KEY)
+            .fetch_one(&mut *lock_connection)
+            .await?;
 
-        Ok(Self { pool })
+        if is_writer {
+            Self::run_migrations(&pool).await?;
+        } else {
+            log::info!("Another process owns the tracking writer lock; running read-only");
+        }
+
+        Ok(Self {
+            pool,
+            _writer_lock: is_writer.then_some(lock_connection),
+            is_writer,
+        })
+    }
+
+    pub fn is_writer(&self) -> bool {
+        self.is_writer
     }
 
     async fn run_migrations(pool: &Pool) -> Result<()> {
@@ -68,14 +93,14 @@ impl Database {
 
         for migration in MIGRATIONS {
             let already_applied: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = $1)"
+                "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = $1)",
             )
             .bind(migration.version)
             .fetch_one(pool)
             .await?;
 
             if !already_applied {
-                use sha2::{Sha256, Digest};
+                use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
                 hasher.update(migration.sql.as_bytes());
                 let checksum = hasher.finalize().to_vec();
@@ -97,7 +122,11 @@ impl Database {
                         .execute(pool)
                         .await?;
 
-                        log::info!("Applied migration: {} ({}ms)", migration.description, execution_time);
+                        log::info!(
+                            "Applied migration: {} ({}ms)",
+                            migration.description,
+                            execution_time
+                        );
                     }
                     Err(e) => {
                         sqlx::query(
@@ -113,7 +142,11 @@ impl Database {
                         .await
                         .ok();
 
-                        return Err(anyhow::anyhow!("Migration failed: {}: {}", migration.description, e));
+                        return Err(anyhow::anyhow!(
+                            "Migration failed: {}: {}",
+                            migration.description,
+                            e
+                        ));
                     }
                 }
             }
@@ -121,8 +154,6 @@ impl Database {
 
         Ok(())
     }
-
-
 
     pub async fn get_browser_page_title_rename(&self, title: &str) -> Result<Option<String>> {
         let renamed: Option<(String,)> = sqlx::query_as(
@@ -211,7 +242,8 @@ impl Database {
 
         if let Some(title) = &session.browser_page_title {
             session.browser_page_title_renamed = self.get_browser_page_title_rename(title).await?;
-            session.browser_page_title_category = self.get_browser_page_title_category(title).await?;
+            session.browser_page_title_category =
+                self.get_browser_page_title_category(title).await?;
         }
         if let Some(dir) = &session.terminal_directory {
             session.terminal_directory_renamed = self.get_terminal_directory_rename(dir).await?;
@@ -229,6 +261,12 @@ impl Database {
     }
 
     pub async fn insert_session(&self, session: &Session) -> Result<i32> {
+        if !self.is_writer {
+            return Err(anyhow::anyhow!(
+                "database is read-only; another process owns recording"
+            ));
+        }
+
         let id: (i32,) = sqlx::query_as(
             r#"
             INSERT INTO sessions (
@@ -242,7 +280,7 @@ impl Database {
                 tmux_window_name, tmux_pane_count, terminal_multiplexer,
                 tmux_window_name_renamed, tmux_window_name_category,
                 ide_project_name, ide_file_open, ide_workspace,
-                parsed_data, parsing_success, is_afk
+                parsed_data, parsing_success, is_afk, is_idle, idle_accumulation_secs
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8,
@@ -254,7 +292,7 @@ impl Database {
                 $23, $24, $25,
                 $26, $27,
                 $28, $29, $30,
-                $31, $32, $33
+                $31, $32, $33, $34, $35
             ) RETURNING id
             "#,
         )
@@ -298,18 +336,100 @@ impl Database {
         .bind(session.parsing_success)
         // AFK tracking
         .bind(session.is_afk)
+        .bind(session.is_idle)
+        .bind(session.idle_accumulation_secs)
         .fetch_one(&self.pool)
         .await?;
         Ok(id.0)
     }
 
-    pub async fn get_app_rename(&self, original_app_name: &str) -> Result<Option<String>> {
-        let rename: Option<(String,)> = sqlx::query_as(
-            "SELECT renamed_app_name FROM app_renames WHERE original_app_name = $1"
+    pub async fn update_session(&self, session: &Session) -> Result<()> {
+        if !self.is_writer {
+            return Err(anyhow::anyhow!(
+                "database is read-only; another process owns recording"
+            ));
+        }
+
+        let id = session
+            .id
+            .ok_or_else(|| anyhow::anyhow!("cannot update a session without an id"))?;
+
+        sqlx::query(
+            r#"
+            UPDATE sessions SET
+                app_name = $1, window_name = $2, duration = $3, category = $4,
+                browser_url = $5, browser_page_title = $6, browser_notification_count = $7,
+                browser_page_title_renamed = $8, browser_page_title_category = $9,
+                terminal_username = $10, terminal_hostname = $11, terminal_directory = $12,
+                terminal_project_name = $13, terminal_directory_renamed = $14,
+                terminal_directory_category = $15,
+                editor_filename = $16, editor_filepath = $17, editor_project_path = $18,
+                editor_language = $19, editor_filename_renamed = $20,
+                editor_filename_category = $21,
+                tmux_window_name = $22, tmux_pane_count = $23, terminal_multiplexer = $24,
+                tmux_window_name_renamed = $25, tmux_window_name_category = $26,
+                ide_project_name = $27, ide_file_open = $28, ide_workspace = $29,
+                parsed_data = $30, parsing_success = $31, is_afk = $32, is_idle = $33,
+                idle_accumulation_secs = $34
+            WHERE id = $35
+            "#,
         )
-        .bind(original_app_name)
-        .fetch_optional(&self.pool)
+        .bind(&session.app_name)
+        .bind(&session.window_name)
+        .bind(session.duration)
+        .bind(&session.category)
+        .bind(&session.browser_url)
+        .bind(&session.browser_page_title)
+        .bind(session.browser_notification_count)
+        .bind(&session.browser_page_title_renamed)
+        .bind(&session.browser_page_title_category)
+        .bind(&session.terminal_username)
+        .bind(&session.terminal_hostname)
+        .bind(&session.terminal_directory)
+        .bind(&session.terminal_project_name)
+        .bind(&session.terminal_directory_renamed)
+        .bind(&session.terminal_directory_category)
+        .bind(&session.editor_filename)
+        .bind(&session.editor_filepath)
+        .bind(&session.editor_project_path)
+        .bind(&session.editor_language)
+        .bind(&session.editor_filename_renamed)
+        .bind(&session.editor_filename_category)
+        .bind(&session.tmux_window_name)
+        .bind(session.tmux_pane_count)
+        .bind(&session.terminal_multiplexer)
+        .bind(&session.tmux_window_name_renamed)
+        .bind(&session.tmux_window_name_category)
+        .bind(&session.ide_project_name)
+        .bind(&session.ide_file_open)
+        .bind(&session.ide_workspace)
+        .bind(&session.parsed_data)
+        .bind(session.parsing_success)
+        .bind(session.is_afk)
+        .bind(session.is_idle)
+        .bind(session.idle_accumulation_secs)
+        .bind(id)
+        .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    pub async fn persist_session(&self, session: &Session) -> Result<i32> {
+        if let Some(id) = session.id {
+            self.update_session(session).await?;
+            Ok(id)
+        } else {
+            self.insert_session(session).await
+        }
+    }
+
+    pub async fn get_app_rename(&self, original_app_name: &str) -> Result<Option<String>> {
+        let rename: Option<(String,)> =
+            sqlx::query_as("SELECT renamed_app_name FROM app_renames WHERE original_app_name = $1")
+                .bind(original_app_name)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(rename.map(|(r,)| r))
     }
 }

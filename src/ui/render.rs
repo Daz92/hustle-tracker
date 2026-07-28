@@ -1,13 +1,13 @@
+use crate::ui::app::{App, AppState, InputAction, ViewMode};
+use chrono::Local;
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Bar, BarChart, BarGroup, Block, Borders, List, ListItem, Paragraph},
-    style::{Color, Style, Modifier},
-    Frame,
 };
- use chrono::Local;
- use std::collections::BTreeMap;
- use crate::ui::app::{App, AppState, InputAction, ViewMode};
+use std::collections::BTreeMap;
 
 pub fn draw(app: &App, f: &mut Frame) {
     let size = f.area();
@@ -19,7 +19,9 @@ pub fn draw(app: &App, f: &mut Frame) {
     // Status bar with Shift+C indicator
     let status = match &app.state {
         AppState::Dashboard { .. } => {
-            if let Some(session) = &app.current_session {
+            if !app.recording_enabled {
+                format!("Read-only: recording handled by another process | [Shift+C] Commands | [s] History")
+            } else if let Some(session) = &app.current_session {
                 let duration = Local::now().signed_duration_since(session.start_time).num_seconds();
                 let display_name = app.manual_app_name.as_ref().unwrap_or(&session.app_name);
                 format!("Tracking: {} for {}s | [Shift+C] Commands | [s] History", display_name, duration)
@@ -42,8 +44,8 @@ pub fn draw(app: &App, f: &mut Frame) {
         AppState::BreakdownDashboard { .. } => "📊 Activity Breakdown Dashboard - [Tab] Switch Panels | [Enter] Select | [↑/↓/PgUp/PgDn] Navigate | [Esc] Close".to_string(),
     };
 
-    let status_widget = Paragraph::new(status)
-        .block(Block::default().borders(Borders::ALL).title("Status"));
+    let status_widget =
+        Paragraph::new(status).block(Block::default().borders(Borders::ALL).title("Status"));
     f.render_widget(status_widget, chunks[0]);
 
     // Main content area
@@ -56,14 +58,19 @@ pub fn draw(app: &App, f: &mut Frame) {
                 .take(20)
                 .map(|log| ListItem::new(Line::from(log.clone())))
                 .collect();
-            let log_list = List::new(log_items)
-                .block(Block::default().borders(Borders::ALL).title("Logs"));
+            let log_list =
+                List::new(log_items).block(Block::default().borders(Borders::ALL).title("Logs"));
             f.render_widget(log_list, chunks[1]);
         }
 
-        AppState::SelectingApp { selected_index, selected_unique_id: _ } => {
+        AppState::SelectingApp {
+            selected_index,
+            selected_unique_id: _,
+        } => {
             // Full-screen app selection view
-            let max_items = (chunks[1].height.saturating_sub(2) as usize).min(app.daily_usage.len()).max(5);
+            let max_items = (chunks[1].height.saturating_sub(2) as usize)
+                .min(app.daily_usage.len())
+                .max(5);
             let mut last_parent_color = Color::White;
             let usage_items: Vec<ListItem> = app
                 .daily_usage
@@ -114,14 +121,18 @@ pub fn draw(app: &App, f: &mut Frame) {
                 })
                 .collect();
 
-            let usage_list = List::new(usage_items)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title("📝 Select App to Rename (↑/↓ to navigate, Enter to select, Esc to cancel)"));
+            let usage_list =
+                List::new(usage_items).block(Block::default().borders(Borders::ALL).title(
+                    "📝 Select App to Rename (↑/↓ to navigate, Enter to select, Esc to cancel)",
+                ));
             f.render_widget(usage_list, chunks[1]);
         }
 
-        AppState::SelectingCategory { selected_index, selected_unique_id: _, scroll_offset } => {
+        AppState::SelectingCategory {
+            selected_index,
+            selected_unique_id: _,
+            scroll_offset,
+        } => {
             // Full-screen app selection view for category assignment
             let viewport_height = chunks[1].height.saturating_sub(2) as usize;
             let max_items = viewport_height.min(app.daily_usage.len()).max(5);
@@ -138,7 +149,11 @@ pub fn draw(app: &App, f: &mut Frame) {
                     let hours = duration / 3600;
                     let minutes = (duration % 3600) / 60;
                     let seconds = duration % 60;
-                    let prefix = if actual_index == *selected_index { "→ " } else { "  " };
+                    let prefix = if actual_index == *selected_index {
+                        "→ "
+                    } else {
+                        "  "
+                    };
 
                     let time_display = if hours > 0 {
                         format!("{}h {}m {}s", hours, minutes, seconds)
@@ -166,7 +181,10 @@ pub fn draw(app: &App, f: &mut Frame) {
                         last_parent_color = color;
                     }
 
-                    let display = format!("{}{:<30} {} [{}]", prefix, clean_app, time_display, category);
+                    let display = format!(
+                        "{}{:<30} {} [{}]",
+                        prefix, clean_app, time_display, category
+                    );
 
                     let style = if actual_index == *selected_index {
                         Style::default().fg(Color::Yellow)
@@ -187,7 +205,11 @@ pub fn draw(app: &App, f: &mut Frame) {
             f.render_widget(usage_list, chunks[1]);
         }
 
-        AppState::CategoryMenu { unique_id, selected_index, scroll_offset } => {
+        AppState::CategoryMenu {
+            unique_id,
+            selected_index,
+            scroll_offset,
+        } => {
             // Show category selection menu
             let categories = app.get_category_options();
             let viewport_height = chunks[1].height.saturating_sub(2) as usize;
@@ -199,7 +221,11 @@ pub fn draw(app: &App, f: &mut Frame) {
                 .enumerate()
                 .map(|(i, category)| {
                     let actual_index = i + *scroll_offset;
-                    let prefix = if actual_index == *selected_index { "→ " } else { "  " };
+                    let prefix = if actual_index == *selected_index {
+                        "→ "
+                    } else {
+                        "  "
+                    };
                     let display = format!("{}{}", prefix, category);
 
                     let style = if actual_index == *selected_index {
@@ -221,15 +247,20 @@ pub fn draw(app: &App, f: &mut Frame) {
                 unique_id
             };
             let clean_app = App::clean_app_name(app_name);
-            let title = format!("🏷️  Select Category for '{}' (↑/↓/PgUp/PgDn to navigate, Enter to select, Esc to cancel)", clean_app);
+            let title = format!(
+                "🏷️  Select Category for '{}' (↑/↓/PgUp/PgDn to navigate, Enter to select, Esc to cancel)",
+                clean_app
+            );
             let category_list = List::new(category_items)
-                .block(Block::default()
-                    .borders(Borders::ALL)
-                    .title(title));
+                .block(Block::default().borders(Borders::ALL).title(title));
             f.render_widget(category_list, chunks[1]);
         }
 
-        AppState::Input { prompt, buffer, action } => {
+        AppState::Input {
+            prompt,
+            buffer,
+            action,
+        } => {
             // Full-screen input view with centered input box
             let input_area = App::centered_rect(70, 30, chunks[1]);
 
@@ -253,14 +284,16 @@ pub fn draw(app: &App, f: &mut Frame) {
                     ratatui::text::Span::styled("█", Style::default().fg(Color::Yellow)),
                 ]),
                 Line::from(""),
-                Line::from("  Press Enter to confirm, Esc to cancel").style(Style::default().fg(Color::Gray)),
+                Line::from("  Press Enter to confirm, Esc to cancel")
+                    .style(Style::default().fg(Color::Gray)),
             ];
 
-            let input_widget = Paragraph::new(input_text)
-                .block(Block::default()
+            let input_widget = Paragraph::new(input_text).block(
+                Block::default()
                     .borders(Borders::ALL)
                     .title(title)
-                    .style(Style::default().bg(Color::Black)));
+                    .style(Style::default().bg(Color::Black)),
+            );
 
             f.render_widget(input_widget, input_area);
         }
@@ -292,15 +325,19 @@ pub fn draw(app: &App, f: &mut Frame) {
                 Line::from("  Press Esc to close this menu"),
             ];
 
-            let popup = Paragraph::new(commands_text)
-                .block(Block::default()
+            let popup = Paragraph::new(commands_text).block(
+                Block::default()
                     .borders(Borders::ALL)
                     .title("📋 Commands Menu")
-                    .style(Style::default().bg(Color::Black)));
+                    .style(Style::default().bg(Color::Black)),
+            );
             f.render_widget(popup, popup_area);
         }
 
-        AppState::HistoryPopup { view_mode, scroll_position } => {
+        AppState::HistoryPopup {
+            view_mode,
+            scroll_position,
+        } => {
             // Show dashboard in background
             app.draw_dashboard(f, chunks[1], view_mode);
 
@@ -337,7 +374,7 @@ pub fn draw(app: &App, f: &mut Frame) {
                     format!("{}  {} - {}s", time, display_name, seconds)
                 };
                 let style = if idx == 0 && start_idx == 0 {
-                    Style::default().fg(Color::Yellow)  // Highlight first (most recent)
+                    Style::default().fg(Color::Yellow) // Highlight first (most recent)
                 } else {
                     Style::default()
                 };
@@ -347,20 +384,30 @@ pub fn draw(app: &App, f: &mut Frame) {
 
             // Add indicator if there are more items to scroll
             let scroll_indicator = if app.current_history.len() > max_visible_items {
-                format!(" (Showing {}-{} of {} sessions)", start_idx + 1, end_idx, app.current_history.len())
+                format!(
+                    " (Showing {}-{} of {} sessions)",
+                    start_idx + 1,
+                    end_idx,
+                    app.current_history.len()
+                )
             } else {
                 format!(" ({} sessions)", app.current_history.len())
             };
 
-            let history_list = List::new(history_items)
-                .block(Block::default()
+            let history_list = List::new(history_items).block(
+                Block::default()
                     .borders(Borders::ALL)
                     .title(format!("📜 Session History{}", scroll_indicator))
-                    .style(Style::default().bg(Color::Black)));
+                    .style(Style::default().bg(Color::Black)),
+            );
             f.render_widget(history_list, popup_area);
         }
 
-        AppState::BreakdownDashboard { view_mode, selected_panel, panel_scrolls } => {
+        AppState::BreakdownDashboard {
+            view_mode,
+            selected_panel,
+            panel_scrolls,
+        } => {
             // Show dashboard in background
             app.draw_dashboard(f, chunks[1], view_mode);
 
@@ -376,7 +423,10 @@ pub fn draw(app: &App, f: &mut Frame) {
             f.render_widget(popup_block, popup_area);
 
             // Inner area for layout
-            let inner_area = popup_area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+            let inner_area = popup_area.inner(ratatui::layout::Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
 
             // Determine layout based on available width
             let use_vertical_layout = inner_area.width < 100;
@@ -385,56 +435,121 @@ pub fn draw(app: &App, f: &mut Frame) {
                 // Vertical stack layout for small screens
                 let sections = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Percentage(20),
-                        Constraint::Percentage(20),
-                        Constraint::Percentage(20),
-                        Constraint::Percentage(20),
-                        Constraint::Percentage(20),
-                    ].as_ref())
+                    .constraints(
+                        [
+                            Constraint::Percentage(20),
+                            Constraint::Percentage(20),
+                            Constraint::Percentage(20),
+                            Constraint::Percentage(20),
+                            Constraint::Percentage(20),
+                        ]
+                        .as_ref(),
+                    )
                     .split(inner_area);
 
                 // Render each section with highlighting
                 let category_style = if *selected_panel == 0 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let browser_style = if *selected_panel == 1 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let project_style = if *selected_panel == 2 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let file_style = if *selected_panel == 3 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let terminal_style = if *selected_panel == 4 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
 
-                draw_breakdown_section_with_style(f, sections[0], BreakdownConfig { title: "📦 Categories", data: &app.category_breakdown, color: Color::Magenta, is_category: true, style: category_style, scroll_position: panel_scrolls[0] });
-                draw_breakdown_section_with_style(f, sections[1], BreakdownConfig { title: "🌐 Browser Services", data: &app.browser_breakdown, color: Color::Blue, is_category: false, style: browser_style, scroll_position: panel_scrolls[1] });
-                draw_breakdown_section_with_style(f, sections[2], BreakdownConfig { title: "📁 Projects", data: &app.project_breakdown, color: Color::Yellow, is_category: false, style: project_style, scroll_position: panel_scrolls[2] });
-                app.draw_file_breakdown_section_with_style(f, sections[3], panel_scrolls[3], file_style);
-                draw_breakdown_section_with_style(f, sections[4], BreakdownConfig { title: "💻 Terminal Sessions", data: &app.terminal_breakdown, color: Color::Green, is_category: false, style: terminal_style, scroll_position: panel_scrolls[4] });
+                draw_breakdown_section_with_style(
+                    f,
+                    sections[0],
+                    BreakdownConfig {
+                        title: "📦 Categories",
+                        data: &app.category_breakdown,
+                        color: Color::Magenta,
+                        is_category: true,
+                        style: category_style,
+                        scroll_position: panel_scrolls[0],
+                    },
+                );
+                draw_breakdown_section_with_style(
+                    f,
+                    sections[1],
+                    BreakdownConfig {
+                        title: "🌐 Browser Services",
+                        data: &app.browser_breakdown,
+                        color: Color::Blue,
+                        is_category: false,
+                        style: browser_style,
+                        scroll_position: panel_scrolls[1],
+                    },
+                );
+                draw_breakdown_section_with_style(
+                    f,
+                    sections[2],
+                    BreakdownConfig {
+                        title: "📁 Projects",
+                        data: &app.project_breakdown,
+                        color: Color::Yellow,
+                        is_category: false,
+                        style: project_style,
+                        scroll_position: panel_scrolls[2],
+                    },
+                );
+                app.draw_file_breakdown_section_with_style(
+                    f,
+                    sections[3],
+                    panel_scrolls[3],
+                    file_style,
+                );
+                draw_breakdown_section_with_style(
+                    f,
+                    sections[4],
+                    BreakdownConfig {
+                        title: "💻 Terminal Sessions",
+                        data: &app.terminal_breakdown,
+                        color: Color::Green,
+                        is_category: false,
+                        style: terminal_style,
+                        scroll_position: panel_scrolls[4],
+                    },
+                );
             } else {
                 // Grid layout for larger screens
                 let rows = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Percentage(33),
-                        Constraint::Percentage(33),
-                        Constraint::Percentage(34),
-                    ].as_ref())
+                    .constraints(
+                        [
+                            Constraint::Percentage(33),
+                            Constraint::Percentage(33),
+                            Constraint::Percentage(34),
+                        ]
+                        .as_ref(),
+                    )
                     .split(inner_area);
 
                 // Row 1: Categories | Browser Services
@@ -454,36 +569,95 @@ pub fn draw(app: &App, f: &mut Frame) {
 
                 // Render each section with highlighting
                 let category_style = if *selected_panel == 0 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let browser_style = if *selected_panel == 1 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let project_style = if *selected_panel == 2 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let file_style = if *selected_panel == 3 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
                 let terminal_style = if *selected_panel == 4 {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
 
-                draw_breakdown_section_with_style(f, row1_cols[0], BreakdownConfig { title: "📦 Categories", data: &app.category_breakdown, color: Color::Magenta, is_category: true, style: category_style, scroll_position: panel_scrolls[0] });
-                draw_breakdown_section_with_style(f, row1_cols[1], BreakdownConfig { title: "🌐 Browser Services", data: &app.browser_breakdown, color: Color::Blue, is_category: false, style: browser_style, scroll_position: panel_scrolls[1] });
-                draw_breakdown_section_with_style(f, row2_cols[0], BreakdownConfig { title: "📁 Projects", data: &app.project_breakdown, color: Color::Yellow, is_category: false, style: project_style, scroll_position: panel_scrolls[2] });
-                app.draw_file_breakdown_section_with_style(f, row2_cols[1], panel_scrolls[3], file_style);
-                draw_breakdown_section_with_style(f, row3_area, BreakdownConfig { title: "💻 Terminal Sessions", data: &app.terminal_breakdown, color: Color::Green, is_category: false, style: terminal_style, scroll_position: panel_scrolls[4] });
+                draw_breakdown_section_with_style(
+                    f,
+                    row1_cols[0],
+                    BreakdownConfig {
+                        title: "📦 Categories",
+                        data: &app.category_breakdown,
+                        color: Color::Magenta,
+                        is_category: true,
+                        style: category_style,
+                        scroll_position: panel_scrolls[0],
+                    },
+                );
+                draw_breakdown_section_with_style(
+                    f,
+                    row1_cols[1],
+                    BreakdownConfig {
+                        title: "🌐 Browser Services",
+                        data: &app.browser_breakdown,
+                        color: Color::Blue,
+                        is_category: false,
+                        style: browser_style,
+                        scroll_position: panel_scrolls[1],
+                    },
+                );
+                draw_breakdown_section_with_style(
+                    f,
+                    row2_cols[0],
+                    BreakdownConfig {
+                        title: "📁 Projects",
+                        data: &app.project_breakdown,
+                        color: Color::Yellow,
+                        is_category: false,
+                        style: project_style,
+                        scroll_position: panel_scrolls[2],
+                    },
+                );
+                app.draw_file_breakdown_section_with_style(
+                    f,
+                    row2_cols[1],
+                    panel_scrolls[3],
+                    file_style,
+                );
+                draw_breakdown_section_with_style(
+                    f,
+                    row3_area,
+                    BreakdownConfig {
+                        title: "💻 Terminal Sessions",
+                        data: &app.terminal_breakdown,
+                        color: Color::Green,
+                        is_category: false,
+                        style: terminal_style,
+                        scroll_position: panel_scrolls[4],
+                    },
+                );
             }
         }
     }
@@ -520,24 +694,38 @@ pub fn draw_dashboard(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode
     };
 
     // Create a mutable clone to sort for the bar chart, filtering out sub-entries
-    let mut sorted_bar_data: Vec<_> = data.iter().filter(|item| !item.is_sub_entry).cloned().collect();
+    let mut sorted_bar_data: Vec<_> = data
+        .iter()
+        .filter(|item| !item.is_sub_entry)
+        .cloned()
+        .collect();
     sorted_bar_data.sort_by(|a, b| b.duration.cmp(&a.duration));
 
     // Create bar chart data - limit based on space
-    let max_bars = if area.width < 80 { 5 } else if area.width < 120 { 8 } else { 10 };
-    let bar_data: &[crate::ui::hierarchical::HierarchicalDisplayItem] = &sorted_bar_data[..sorted_bar_data.len().min(max_bars)];
+    let max_bars = if area.width < 80 {
+        5
+    } else if area.width < 120 {
+        8
+    } else {
+        10
+    };
+    let bar_data: &[crate::ui::hierarchical::HierarchicalDisplayItem] =
+        &sorted_bar_data[..sorted_bar_data.len().min(max_bars)];
 
     if use_vertical_layout {
         // VERTICAL LAYOUT for small terminals
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(10),  // Bar chart
-                Constraint::Min(8),   // Timeline (now sessions timeline)
-                Constraint::Min(8),   // AFK
-                Constraint::Min(8),   // Stats
-                Constraint::Min(8),   // Categories
-            ].as_ref())
+            .constraints(
+                [
+                    Constraint::Min(10), // Bar chart
+                    Constraint::Min(8),  // Timeline (now sessions timeline)
+                    Constraint::Min(8),  // AFK
+                    Constraint::Min(8),  // Stats
+                    Constraint::Min(8),  // Categories
+                ]
+                .as_ref(),
+            )
             .split(area);
 
         app.draw_bar_chart(f, chunks[0], title, bar_data);
@@ -550,37 +738,43 @@ pub fn draw_dashboard(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode
         // Main layout: top section (left/right) + bottom section (timeline)
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(85),  // Top section (dashboard)
-                Constraint::Percentage(15),  // Bottom section (sessions timeline)
-            ].as_ref())
+            .constraints(
+                [
+                    Constraint::Percentage(85), // Top section (dashboard)
+                    Constraint::Percentage(15), // Bottom section (sessions timeline)
+                ]
+                .as_ref(),
+            )
             .split(area);
 
         // TOP SECTION: 50/50 left/right split
         let dashboard_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ].as_ref())
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
             .split(main_chunks[0]);
 
         // LEFT SIDE: Bar Chart + Timeline/AFK
         let left_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),   // Bar chart
-                Constraint::Percentage(50),   // Timeline + AFK
-            ].as_ref())
+            .constraints(
+                [
+                    Constraint::Percentage(50), // Bar chart
+                    Constraint::Percentage(50), // Timeline + AFK
+                ]
+                .as_ref(),
+            )
             .split(dashboard_chunks[0]);
 
         // RIGHT SIDE: Detailed Stats + Categories
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),   // Detailed stats
-                Constraint::Percentage(50),   // Categories (pie chart)
-            ].as_ref())
+            .constraints(
+                [
+                    Constraint::Percentage(50), // Detailed stats
+                    Constraint::Percentage(50), // Categories (pie chart)
+                ]
+                .as_ref(),
+            )
             .split(dashboard_chunks[1]);
 
         app.draw_bar_chart(f, left_chunks[0], title, bar_data);
@@ -598,7 +792,13 @@ pub fn draw_dashboard(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode
     }
 }
 
-pub fn draw_bar_chart(app: &App, f: &mut Frame, area: Rect, title: &str, bar_data: &[crate::ui::hierarchical::HierarchicalDisplayItem]) {
+pub fn draw_bar_chart(
+    app: &App,
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    bar_data: &[crate::ui::hierarchical::HierarchicalDisplayItem],
+) {
     if bar_data.is_empty() {
         let empty_msg = Paragraph::new("No data available yet. Start tracking!")
             .block(Block::default().borders(Borders::ALL).title(title));
@@ -609,12 +809,16 @@ pub fn draw_bar_chart(app: &App, f: &mut Frame, area: Rect, title: &str, bar_dat
         let bar_gap = if area.width < 60 { 0 } else { 1 };
 
         // Find max value in minutes
-        let max_minutes = bar_data.iter().map(|item| (item.duration / 60) as u64).max().unwrap_or(0);
+        let max_minutes = bar_data
+            .iter()
+            .map(|item| (item.duration / 60) as u64)
+            .max()
+            .unwrap_or(0);
 
         // Calculate scale: minimum 8h (480 min), or max_value + 2h (120 min)
         // This ensures bars never reach the top
         let scale_minutes = if max_minutes <= 480 {
-            480  // 8h default for regular workday
+            480 // 8h default for regular workday
         } else {
             // Round up to next hour and add 2h buffer
             ((max_minutes / 60) + 3) * 60
@@ -659,7 +863,11 @@ pub fn draw_bar_chart(app: &App, f: &mut Frame, area: Rect, title: &str, bar_dat
 
                 let clean_app = App::clean_app_name(&item.display_name).trim().to_string();
                 let label = if clean_app.len() > bar_width as usize {
-                    format!("{:<width$.width$}", &clean_app[..bar_width as usize], width = bar_width as usize)
+                    format!(
+                        "{:<width$.width$}",
+                        &clean_app[..bar_width as usize],
+                        width = bar_width as usize
+                    )
                 } else {
                     format!("{:<width$}", clean_app, width = bar_width as usize)
                 };
@@ -678,13 +886,18 @@ pub fn draw_bar_chart(app: &App, f: &mut Frame, area: Rect, title: &str, bar_dat
             .block(Block::default().borders(Borders::ALL).title(chart_title))
             .bar_width(bar_width)
             .bar_gap(bar_gap)
-            .max(scale_minutes)  // Set max scale directly instead of padding bar
+            .max(scale_minutes) // Set max scale directly instead of padding bar
             .data(BarGroup::default().bars(&bars));
         f.render_widget(barchart, area);
     }
 }
 
-pub fn draw_stats(f: &mut Frame, area: Rect, data: &[crate::ui::hierarchical::HierarchicalDisplayItem], app: &App) {
+pub fn draw_stats(
+    f: &mut Frame,
+    area: Rect,
+    data: &[crate::ui::hierarchical::HierarchicalDisplayItem],
+    app: &App,
+) {
     // Adaptive number of items based on available height - more items for hierarchical view
     let max_items = (area.height.saturating_sub(3) as usize).clamp(5, 30);
 
@@ -756,7 +969,8 @@ pub fn draw_stats(f: &mut Frame, area: Rect, data: &[crate::ui::hierarchical::Hi
         stats_items.push(ListItem::new(Line::from(display)).style(item_style));
     }
 
-    let total_duration: i64 = data.iter()
+    let total_duration: i64 = data
+        .iter()
         .filter(|item| !item.is_sub_entry) // Only count parent entries
         .map(|item| item.duration)
         .sum();
@@ -764,23 +978,35 @@ pub fn draw_stats(f: &mut Frame, area: Rect, data: &[crate::ui::hierarchical::Hi
     let total_minutes = (total_duration % 3600) / 60;
     let total_seconds = total_duration % 60;
     let stats_title = if total_hours > 0 {
-        format!("📈 Detailed Stats (Total: {}h {}m {}s)", total_hours, total_minutes, total_seconds)
+        format!(
+            "📈 Detailed Stats (Total: {}h {}m {}s)",
+            total_hours, total_minutes, total_seconds
+        )
     } else if total_minutes > 0 {
-        format!("📈 Detailed Stats (Total: {}m {}s)", total_minutes, total_seconds)
+        format!(
+            "📈 Detailed Stats (Total: {}m {}s)",
+            total_minutes, total_seconds
+        )
     } else {
         format!("📈 Detailed Stats (Total: {}s)", total_seconds)
     };
 
-    let stats_list = List::new(stats_items)
-        .block(Block::default().borders(Borders::ALL).title(stats_title));
+    let stats_list =
+        List::new(stats_items).block(Block::default().borders(Borders::ALL).title(stats_title));
     f.render_widget(stats_list, area);
 }
 
-pub fn draw_pie_chart(app: &App, f: &mut Frame, area: Rect, data: &[crate::ui::hierarchical::HierarchicalDisplayItem]) {
+pub fn draw_pie_chart(
+    app: &App,
+    f: &mut Frame,
+    area: Rect,
+    data: &[crate::ui::hierarchical::HierarchicalDisplayItem],
+) {
     // Calculate category totals - using BTreeMap for stable sorted order
     // Filter out sub-entries
     let mut categories: BTreeMap<String, (i64, Color)> = BTreeMap::new();
-    let total: i64 = data.iter()
+    let total: i64 = data
+        .iter()
         .filter(|item| !item.is_sub_entry)
         .map(|item| item.duration)
         .sum();
@@ -827,8 +1053,11 @@ pub fn draw_pie_chart(app: &App, f: &mut Frame, area: Rect, data: &[crate::ui::h
         }
     }
 
-    let pie_chart = Paragraph::new(pie_lines)
-        .block(Block::default().borders(Borders::ALL).title("🥧 Categories"));
+    let pie_chart = Paragraph::new(pie_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("🥧 Categories"),
+    );
     f.render_widget(pie_chart, area);
 }
 
@@ -843,15 +1072,27 @@ pub fn draw_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode)
         ViewMode::Daily => {
             if app.flat_daily_usage.is_empty() {
                 progress_lines.push(Line::from("No activity data yet today"));
-                let progress = Paragraph::new(progress_lines)
-                    .block(Block::default().borders(Borders::ALL).title("📊 Today's Activity Progress"));
+                let progress = Paragraph::new(progress_lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("📊 Today's Activity Progress"),
+                );
                 f.render_widget(progress, area);
                 return;
             }
             let now = Local::now();
-            let start_of_day = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(Local).unwrap();
+            let start_of_day = now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .unwrap();
             let secs = now.signed_duration_since(start_of_day).num_seconds() as f64;
-            (app.flat_daily_usage.clone(), "📊 Today's Activity Progress".to_string(), secs)
+            (
+                app.flat_daily_usage.clone(),
+                "📊 Today's Activity Progress".to_string(),
+                secs,
+            )
         }
         ViewMode::Weekly => {
             // Calculate total seconds in the week
@@ -859,11 +1100,16 @@ pub fn draw_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode)
             let today = now.date_naive();
             let days_since_sunday = today.weekday().num_days_from_sunday();
             let week_start = today - chrono::Duration::days(days_since_sunday as i64);
-            let week_start_time = week_start.and_hms_opt(0, 0, 0).unwrap().and_local_timezone(Local).unwrap();
+            let week_start_time = week_start
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .unwrap();
             let secs = now.signed_duration_since(week_start_time).num_seconds() as f64;
 
             // Aggregate weekly usage from current_history
-            let mut weekly_usage: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+            let mut weekly_usage: std::collections::BTreeMap<String, i64> =
+                std::collections::BTreeMap::new();
             for session in &app.current_history {
                 let session_date = session.start_time.date_naive();
                 if session_date >= week_start {
@@ -877,12 +1123,18 @@ pub fn draw_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode)
             // Calculate total seconds in the month
             let now = Local::now();
             let today = now.date_naive();
-            let month_start = chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
-            let month_start_time = month_start.and_hms_opt(0, 0, 0).unwrap().and_local_timezone(Local).unwrap();
+            let month_start =
+                chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
+            let month_start_time = month_start
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_local_timezone(Local)
+                .unwrap();
             let secs = now.signed_duration_since(month_start_time).num_seconds() as f64;
 
             // Aggregate monthly usage from current_history
-            let mut monthly_usage: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
+            let mut monthly_usage: std::collections::BTreeMap<String, i64> =
+                std::collections::BTreeMap::new();
             for session in &app.current_history {
                 let session_date = session.start_time.date_naive();
                 if session_date >= month_start {
@@ -890,7 +1142,11 @@ pub fn draw_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode)
                 }
             }
             let monthly_vec: Vec<(String, i64)> = monthly_usage.into_iter().collect();
-            (monthly_vec, "📊 Monthly Activity Progress".to_string(), secs)
+            (
+                monthly_vec,
+                "📊 Monthly Activity Progress".to_string(),
+                secs,
+            )
         }
     };
 
@@ -939,8 +1195,14 @@ pub fn draw_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode)
 
         // Create the progress line
         let progress_line = vec![
-            ratatui::text::Span::styled(format!("{:<12}", clean_app_name), Style::default().fg(color)),
-            ratatui::text::Span::styled(format!("{:>5.1}%", percentage), Style::default().fg(Color::Cyan)),
+            ratatui::text::Span::styled(
+                format!("{:<12}", clean_app_name),
+                Style::default().fg(color),
+            ),
+            ratatui::text::Span::styled(
+                format!("{:>5.1}%", percentage),
+                Style::default().fg(Color::Cyan),
+            ),
             ratatui::text::Span::raw(" "),
             ratatui::text::Span::styled(bar_chars, Style::default().fg(color)),
         ];
@@ -948,13 +1210,13 @@ pub fn draw_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode)
         progress_lines.push(Line::from(progress_line));
     }
 
-    let progress = Paragraph::new(progress_lines)
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let progress =
+        Paragraph::new(progress_lines).block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(progress, area);
 }
 
 pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &ViewMode) {
-    use chrono::{Duration, NaiveDate, Datelike, Timelike};
+    use chrono::{Datelike, Duration, NaiveDate, Timelike};
 
     if area.height < 4 {
         let msg = Paragraph::new("Terminal too small for timeline");
@@ -969,9 +1231,8 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
         ViewMode::Daily => {
             // For daily: show 24 hours, group sessions by hour
             let today = now.date_naive();
-            let mut hourly: Vec<(i64, Vec<&crate::models::session::Session>)> = (0..24)
-                .map(|h| (h, vec![]))
-                .collect();
+            let mut hourly: Vec<(i64, Vec<&crate::models::session::Session>)> =
+                (0..24).map(|h| (h, vec![])).collect();
             for session in &app.current_history {
                 if session.start_time.date_naive() == today {
                     let hour = session.start_time.hour() as i64;
@@ -980,16 +1241,20 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
                     }
                 }
             }
-            (hourly, 24, "📅 Today Sessions (24-Hour Activity Timeline)", true)
+            (
+                hourly,
+                24,
+                "📅 Today Sessions (24-Hour Activity Timeline)",
+                true,
+            )
         }
         ViewMode::Weekly => {
             // For weekly: show 7 days
             let date = now.date_naive();
             let days_since_sunday = date.weekday().num_days_from_sunday() as i64;
             let week_start = date - Duration::days(days_since_sunday);
-            let mut daily: Vec<(i64, Vec<&crate::models::session::Session>)> = (0..7)
-                .map(|d| (d, vec![]))
-                .collect();
+            let mut daily: Vec<(i64, Vec<&crate::models::session::Session>)> =
+                (0..7).map(|d| (d, vec![])).collect();
             for session in &app.current_history {
                 let session_date = session.start_time.date_naive();
                 if session_date >= week_start && session_date < week_start + Duration::days(7) {
@@ -999,7 +1264,12 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
                     }
                 }
             }
-            (daily, 7, "📅 Weekly Sessions (7-Day Activity Timeline)", false)
+            (
+                daily,
+                7,
+                "📅 Weekly Sessions (7-Day Activity Timeline)",
+                false,
+            )
         }
         ViewMode::Monthly => {
             // For monthly: show days in current month
@@ -1008,21 +1278,28 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
             let days_in_month = if date.month() == 12 {
                 (NaiveDate::from_ymd_opt(date.year() + 1, 1, 1).unwrap() - month_start).num_days()
             } else {
-                (NaiveDate::from_ymd_opt(date.year(), date.month() + 1, 1).unwrap() - month_start).num_days()
+                (NaiveDate::from_ymd_opt(date.year(), date.month() + 1, 1).unwrap() - month_start)
+                    .num_days()
             };
-            let mut daily: Vec<(i64, Vec<&crate::models::session::Session>)> = (0..days_in_month)
-                .map(|d| (d, vec![]))
-                .collect();
+            let mut daily: Vec<(i64, Vec<&crate::models::session::Session>)> =
+                (0..days_in_month).map(|d| (d, vec![])).collect();
             for session in &app.current_history {
                 let session_date = session.start_time.date_naive();
-                if session_date >= month_start && session_date < month_start + Duration::days(days_in_month) {
+                if session_date >= month_start
+                    && session_date < month_start + Duration::days(days_in_month)
+                {
                     let day_offset = (session_date - month_start).num_days();
                     if day_offset >= 0 && day_offset < days_in_month {
                         daily[day_offset as usize].1.push(session);
                     }
                 }
             }
-            (daily, days_in_month, "📅 Monthly Sessions (Day-By-Day Activity Timeline)", false)
+            (
+                daily,
+                days_in_month,
+                "📅 Monthly Sessions (Day-By-Day Activity Timeline)",
+                false,
+            )
         }
     };
 
@@ -1046,14 +1323,17 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
             Color::DarkGray
         } else {
             // Calculate dominant category by duration
-            let category_map = sessions.iter()
-                .fold(std::collections::HashMap::new(), |mut map, s| {
-                    let cat = s.category.as_deref().unwrap_or("📦 Other");
-                    *map.entry(cat.to_string()).or_insert(0i64) += s.duration;
-                    map
-                });
+            let category_map =
+                sessions
+                    .iter()
+                    .fold(std::collections::HashMap::new(), |mut map, s| {
+                        let cat = s.category.as_deref().unwrap_or("📦 Other");
+                        *map.entry(cat.to_string()).or_insert(0i64) += s.duration;
+                        map
+                    });
 
-            let dominant = category_map.into_iter()
+            let dominant = category_map
+                .into_iter()
                 .max_by_key(|(_, dur)| *dur)
                 .map(|(cat, _)| cat)
                 .unwrap_or_else(|| "📦 Other".to_string());
@@ -1065,7 +1345,10 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
         // Draw colored blocks - use full block character for better visibility
         let block_char = if sessions.is_empty() { "░" } else { "█" };
         for _ in 0..block_width {
-            bar_line.push(ratatui::text::Span::styled(block_char, Style::default().fg(color)));
+            bar_line.push(ratatui::text::Span::styled(
+                block_char,
+                Style::default().fg(color),
+            ));
         }
     }
 
@@ -1074,14 +1357,14 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
     // Build label line - adaptive label frequency based on available space
     let label_interval = if is_daily {
         if available_width > 200 {
-            1  // Show every hour
+            1 // Show every hour
         } else if available_width > 100 {
-            2  // Show every 2 hours
+            2 // Show every 2 hours
         } else {
-            4  // Show every 4 hours
+            4 // Show every 4 hours
         }
     } else {
-        1  // Always show every day/period for weekly/monthly
+        1 // Always show every day/period for weekly/monthly
     };
 
     let mut label_spans = vec![];
@@ -1098,10 +1381,17 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
 
             // Calculate starting position for this label
             let label_start = idx * block_width;
-            let next_label_start = ((idx as i64 + label_interval) as usize).min(num_periods_usize) * block_width;
-            let label_space = next_label_start.saturating_sub(label_start).max(label.len());
+            let next_label_start =
+                ((idx as i64 + label_interval) as usize).min(num_periods_usize) * block_width;
+            let label_space = next_label_start
+                .saturating_sub(label_start)
+                .max(label.len());
 
-            label_spans.push(ratatui::text::Span::raw(format!("{:<width$}", label, width = label_space)));
+            label_spans.push(ratatui::text::Span::raw(format!(
+                "{:<width$}",
+                label,
+                width = label_space
+            )));
         } else if idx as i64 % label_interval != (label_interval - 1) {
             // Add spacing between labels
             let space_width = block_width;
@@ -1114,7 +1404,8 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
     }
 
     // Summary with category breakdown
-    let total_duration: i64 = sessions_data.iter()
+    let total_duration: i64 = sessions_data
+        .iter()
         .flat_map(|(_, s)| s.iter())
         .map(|s| s.duration)
         .sum();
@@ -1122,7 +1413,8 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
     let minutes = (total_duration % 3600) / 60;
 
     // Build category summary for legend
-    let mut category_durations: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut category_durations: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
     for (_, sessions) in &sessions_data {
         for session in sessions {
             let cat = session.category.as_deref().unwrap_or("Other").to_string();
@@ -1142,14 +1434,14 @@ pub fn draw_sessions_timeline(app: &App, f: &mut Frame, area: Rect, view_mode: &
         ));
     }
 
-    let mut summary_line = vec![
-        ratatui::text::Span::raw(format!("Total: {}h {}m | ", hours, minutes)),
-    ];
+    let mut summary_line = vec![ratatui::text::Span::raw(format!(
+        "Total: {}h {}m | ",
+        hours, minutes
+    ))];
     summary_line.extend(category_summary);
     lines.push(ratatui::text::Line::from(summary_line));
 
-    let timeline = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let timeline = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(timeline, area);
 }
 
@@ -1163,21 +1455,37 @@ pub fn draw_afk(app: &App, f: &mut Frame, area: Rect) {
 
     // Determine AFK and IDLE status
     let is_idle = idle_duration >= 600; // 10 minutes = IDLE
-    let status = if is_idle { "IDLE" } else if is_afk { "AFK" } else { "Active" };
-    let color = if is_idle { Color::Yellow } else if is_afk { Color::Red } else { Color::Green };
+    let status = if is_idle {
+        "IDLE"
+    } else if is_afk {
+        "AFK"
+    } else {
+        "Active"
+    };
+    let color = if is_idle {
+        Color::Yellow
+    } else if is_afk {
+        Color::Red
+    } else {
+        Color::Green
+    };
 
     // Calculate average keyboard activity percentage
     // Avg Activity % = (Total Session Time - Total Accumulated Idle) / Total Session Time × 100%
     // Accumulates idle from ALL sessions today + current ongoing idle
 
     // Total tracking time today (excluding IDLE gaps only)
-    let total_tracking_today: i64 = app.current_history.iter()
-        .filter(|s| !s.is_idle.unwrap_or(false))  // Exclude IDLE (10+ min gaps)
+    let total_tracking_today: i64 = app
+        .current_history
+        .iter()
+        .filter(|s| !s.is_idle.unwrap_or(false)) // Exclude IDLE (10+ min gaps)
         .map(|s| s.duration)
         .sum();
 
     // Sum accumulated idle from all past sessions (excluding IDLE gaps)
-    let past_sessions_accumulated_idle: i64 = app.current_history.iter()
+    let past_sessions_accumulated_idle: i64 = app
+        .current_history
+        .iter()
         .filter(|s| !s.is_idle.unwrap_or(false))
         .map(|s| s.idle_accumulation_secs.unwrap_or(0))
         .sum();
@@ -1192,7 +1500,9 @@ pub fn draw_afk(app: &App, f: &mut Frame, area: Rect) {
     // Current session time (excluding IDLE)
     let current_session_time = if let Some(ref session) = app.current_session {
         if !session.is_idle.unwrap_or(false) {
-            Local::now().signed_duration_since(session.start_time).num_seconds()
+            Local::now()
+                .signed_duration_since(session.start_time)
+                .num_seconds()
         } else {
             0
         }
@@ -1204,14 +1514,16 @@ pub fn draw_afk(app: &App, f: &mut Frame, area: Rect) {
     let total_time_in_secs = total_tracking_today + current_session_time;
 
     // If currently idle, add the ongoing idle duration to current session accumulated idle
-    let ongoing_idle_secs = if idle_duration > 0 && idle_duration < 600 && current_session_time > 0 {
-        idle_duration  // Use the actual idle_duration from earlier in the function
+    let ongoing_idle_secs = if idle_duration > 0 && idle_duration < 600 && current_session_time > 0
+    {
+        idle_duration // Use the actual idle_duration from earlier in the function
     } else {
         0
     };
 
     // Total idle = past sessions idle + current session accumulated idle + ongoing idle
-    let total_idle_secs = past_sessions_accumulated_idle + current_session_accumulated_idle + ongoing_idle_secs;
+    let total_idle_secs =
+        past_sessions_accumulated_idle + current_session_accumulated_idle + ongoing_idle_secs;
     let idle_to_subtract = total_idle_secs.min(total_time_in_secs);
 
     // Activity = (total time - idle) / total time
@@ -1236,7 +1548,7 @@ pub fn draw_afk(app: &App, f: &mut Frame, area: Rect) {
             ratatui::text::Span::styled("Avg Activity: ", Style::default()),
             ratatui::text::Span::styled(
                 format!("{:.1}%", avg_activity_percentage),
-                Style::default().fg(Color::Cyan)
+                Style::default().fg(Color::Cyan),
             ),
         ]),
         Line::from(""),
@@ -1245,8 +1557,11 @@ pub fn draw_afk(app: &App, f: &mut Frame, area: Rect) {
         Line::from("IDLE if idle > 10 minutes"),
     ];
 
-    let afk_paragraph = Paragraph::new(afk_lines)
-        .block(Block::default().borders(Borders::ALL).title("🚫 AFK Status"));
+    let afk_paragraph = Paragraph::new(afk_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("🚫 AFK Status"),
+    );
     f.render_widget(afk_paragraph, area);
 }
 
@@ -1259,12 +1574,15 @@ pub struct BreakdownConfig<'a> {
     pub scroll_position: usize,
 }
 
-pub fn draw_breakdown_section_with_style(
-    f: &mut Frame,
-    area: Rect,
-    config: BreakdownConfig<'_>,
-) {
-    let BreakdownConfig { title, data, color, is_category, style, scroll_position } = config;
+pub fn draw_breakdown_section_with_style(f: &mut Frame, area: Rect, config: BreakdownConfig<'_>) {
+    let BreakdownConfig {
+        title,
+        data,
+        color,
+        is_category,
+        style,
+        scroll_position,
+    } = config;
     let max_items = (area.height.saturating_sub(3) as usize).max(3);
     let mut items: Vec<ListItem> = Vec::new();
 
@@ -1274,7 +1592,7 @@ pub fn draw_breakdown_section_with_style(
         // Apply scroll position
         let start_idx = scroll_position.min(data.len().saturating_sub(max_items));
         let end_idx = (start_idx + max_items).min(data.len());
-        
+
         for (name, duration) in data[start_idx..end_idx].iter() {
             let hours = duration / 3600;
             let minutes = (duration % 3600) / 60;
@@ -1299,8 +1617,12 @@ pub fn draw_breakdown_section_with_style(
         }
     }
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title).style(style));
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(style),
+    );
     f.render_widget(list, area);
 }
 
@@ -1320,7 +1642,7 @@ pub fn draw_file_breakdown_section_with_style(
         // Apply scroll position
         let start_idx = scroll_position.min(app.file_breakdown.len().saturating_sub(max_items));
         let end_idx = (start_idx + max_items).min(app.file_breakdown.len());
-        
+
         for (filename, language, duration) in app.file_breakdown[start_idx..end_idx].iter() {
             let hours = duration / 3600;
             let minutes = (duration % 3600) / 60;
@@ -1338,7 +1660,11 @@ pub fn draw_file_breakdown_section_with_style(
         }
     }
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("📝 Files Edited").style(style));
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("📝 Files Edited")
+            .style(style),
+    );
     f.render_widget(list, area);
 }

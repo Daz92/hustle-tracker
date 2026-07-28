@@ -1,10 +1,10 @@
-use anyhow::Result;
-use chrono::Local;
 use crate::database::connection::Database;
 use crate::models::session::Session;
 use crate::tracker::monitor::AppMonitor;
-use crate::ui::session;
 use crate::ui::hierarchical::HierarchicalDisplayItem;
+use crate::ui::session;
+use anyhow::Result;
+use chrono::Local;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewMode {
@@ -74,9 +74,14 @@ pub async fn start_tracking(
         window_name.clone(),
         start_time,
         category_name.to_string(),
-    ).await?;
+    )
+    .await?;
 
-    let log_message = format!("[{}] Started tracking: {}", Local::now().format("%H:%M:%S"), app_name);
+    let log_message = format!(
+        "[{}] Started tracking: {}",
+        Local::now().format("%H:%M:%S"),
+        app_name
+    );
 
     Ok(TrackingResult {
         session,
@@ -107,15 +112,26 @@ pub async fn switch_app_with_afk(
 
     // End current session
     if let Some(mut session) = current_session {
-        session.duration = Local::now().signed_duration_since(session.start_time).num_seconds();
+        session.duration = Local::now()
+            .signed_duration_since(session.start_time)
+            .num_seconds();
 
         // Save ALL sessions regardless of duration
-        if let Err(e) = ctx.database.insert_session(&session).await {
+        if let Err(e) = ctx.database.persist_session(&session).await {
             log::error!("Failed to save session: {}", e);
-            logs.push(format!("[{}] Failed to save session: {}", Local::now().format("%H:%M:%S"), e));
+            logs.push(format!(
+                "[{}] Failed to save session: {}",
+                Local::now().format("%H:%M:%S"),
+                e
+            ));
             saved_session = None;
         } else {
-            logs.push(format!("[{}] Saved session: {} for {}s", Local::now().format("%H:%M:%S"), session.app_name, session.duration));
+            logs.push(format!(
+                "[{}] Saved session: {} for {}s",
+                Local::now().format("%H:%M:%S"),
+                session.app_name,
+                session.duration
+            ));
             saved_session = Some(session);
         }
     } else {
@@ -135,7 +151,8 @@ pub async fn switch_app_with_afk(
             start_time,
             category_name.to_string(),
             Some(afk_flag),
-        ).await?
+        )
+        .await?
     } else {
         session::create_session_with_parsing(
             ctx.database,
@@ -143,10 +160,15 @@ pub async fn switch_app_with_afk(
             window_name.clone(),
             start_time,
             category_name.to_string(),
-        ).await?
+        )
+        .await?
     };
 
-    logs.push(format!("[{}] Switched to: {}", Local::now().format("%H:%M:%S"), new_app));
+    logs.push(format!(
+        "[{}] Switched to: {}",
+        Local::now().format("%H:%M:%S"),
+        new_app
+    ));
 
     Ok(SwitchResult {
         new_session,

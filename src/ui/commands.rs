@@ -1,7 +1,7 @@
-use anyhow::Result;
-use chrono::Local;
 use crate::database::connection::Database;
 use crate::models::session::Session;
+use anyhow::Result;
+use chrono::Local;
 
 /// Command execution context containing app state references
 pub struct CommandContext<'a> {
@@ -50,6 +50,12 @@ pub async fn execute_rename_app(
     unique_id: &str,
     new_name: &str,
 ) -> Result<CommandResult> {
+    if !ctx.database.is_writer() {
+        ctx.logs
+            .push("Recording is handled by another process; rename skipped".to_string());
+        return Ok(CommandResult::success_no_refresh());
+    }
+
     if new_name.is_empty() {
         return Ok(CommandResult::success_no_refresh());
     }
@@ -58,29 +64,68 @@ pub async fn execute_rename_app(
 
     let result = match id_type {
         "app_name" => {
-            let original_category = ctx.database.get_app_category_by_name(original_value).await?.unwrap_or_else(|| "Other".to_string());
-            let rename_result = ctx.database.rename_app_with_category(original_value, new_name, &original_category).await;
+            let original_category = ctx
+                .database
+                .get_app_category_by_name(original_value)
+                .await?
+                .unwrap_or_else(|| "Other".to_string());
+            let rename_result = ctx
+                .database
+                .rename_app_with_category(original_value, new_name, &original_category)
+                .await;
             if rename_result.is_ok() {
-                ctx.database.set_app_rename(original_value, new_name).await?;
+                ctx.database
+                    .set_app_rename(original_value, new_name)
+                    .await?;
             }
             rename_result
-        },
-        "browser_page_title" => ctx.database.rename_browser_page_title(original_value, new_name).await,
-        "terminal_directory" => ctx.database.rename_terminal_directory(original_value, new_name).await,
-        "editor_filename" => ctx.database.rename_editor_filename(original_value, new_name).await,
-        "tmux_window_name" => ctx.database.rename_tmux_window_name(original_value, new_name).await,
+        }
+        "browser_page_title" => {
+            ctx.database
+                .rename_browser_page_title(original_value, new_name)
+                .await
+        }
+        "terminal_directory" => {
+            ctx.database
+                .rename_terminal_directory(original_value, new_name)
+                .await
+        }
+        "editor_filename" => {
+            ctx.database
+                .rename_editor_filename(original_value, new_name)
+                .await
+        }
+        "tmux_window_name" => {
+            ctx.database
+                .rename_tmux_window_name(original_value, new_name)
+                .await
+        }
         _ => {
-            let original_category = ctx.database.get_app_category_by_name(original_value).await?.unwrap_or_else(|| "Other".to_string());
-            let rename_result = ctx.database.rename_app_with_category(original_value, new_name, &original_category).await;
+            let original_category = ctx
+                .database
+                .get_app_category_by_name(original_value)
+                .await?
+                .unwrap_or_else(|| "Other".to_string());
+            let rename_result = ctx
+                .database
+                .rename_app_with_category(original_value, new_name, &original_category)
+                .await;
             if rename_result.is_ok() {
-                ctx.database.set_app_rename(original_value, new_name).await?;
+                ctx.database
+                    .set_app_rename(original_value, new_name)
+                    .await?;
             }
             rename_result
         }
     };
 
     if let Err(e) = result {
-        let error_msg = format!("[{}] Failed to rename {}: {}", Local::now().format("%H:%M:%S"), unique_id, e);
+        let error_msg = format!(
+            "[{}] Failed to rename {}: {}",
+            Local::now().format("%H:%M:%S"),
+            unique_id,
+            e
+        );
         ctx.logs.push(error_msg.clone());
         return Ok(CommandResult::success_no_refresh());
     }
@@ -92,28 +137,28 @@ pub async fn execute_rename_app(
                 if session.app_name == original_value {
                     session.app_name = new_name.to_string();
                 }
-            },
+            }
             "browser_page_title" => {
                 if session.browser_page_title.as_deref() == Some(original_value) {
                     session.browser_page_title_renamed = Some(new_name.to_string());
                 }
-            },
+            }
             "terminal_directory" => {
                 if session.terminal_directory.as_deref() == Some(original_value) {
                     session.terminal_directory_renamed = Some(new_name.to_string());
                 }
-            },
+            }
             "editor_filename" => {
                 if session.editor_filename.as_deref() == Some(original_value) {
                     session.editor_filename_renamed = Some(new_name.to_string());
                 }
-            },
+            }
             "tmux_window_name" => {
                 if session.tmux_window_name.as_deref() == Some(original_value) {
                     session.tmux_window_name_renamed = Some(new_name.to_string());
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
@@ -134,25 +179,65 @@ pub async fn execute_update_category(
     unique_id: &str,
     category: &str,
 ) -> Result<CommandResult> {
+    if !ctx.database.is_writer() {
+        ctx.logs
+            .push("Recording is handled by another process; category update skipped".to_string());
+        return Ok(CommandResult::success_no_refresh());
+    }
+
     if category.is_empty() {
         return Ok(CommandResult::success_no_refresh());
     }
 
     let (id_type, original_value) = unique_id.split_once(':').unwrap_or(("", unique_id));
-    log::info!("Category update: unique_id='{}', id_type='{}', original_value='{}', category='{}'",
-               unique_id, id_type, original_value, category);
+    log::info!(
+        "Category update: unique_id='{}', id_type='{}', original_value='{}', category='{}'",
+        unique_id,
+        id_type,
+        original_value,
+        category
+    );
 
     let result = match id_type {
-        "app_name" => ctx.database.update_app_category(original_value, category).await,
-        "browser_page_title" => ctx.database.categorize_browser_page_title(original_value, category).await,
-        "terminal_directory" => ctx.database.categorize_terminal_directory(original_value, category).await,
-        "editor_filename" => ctx.database.categorize_editor_filename(original_value, category).await,
-        "tmux_window_name" => ctx.database.categorize_tmux_window_name(original_value, category).await,
-        _ => ctx.database.update_app_category(original_value, category).await, // Fallback to app_name
+        "app_name" => {
+            ctx.database
+                .update_app_category(original_value, category)
+                .await
+        }
+        "browser_page_title" => {
+            ctx.database
+                .categorize_browser_page_title(original_value, category)
+                .await
+        }
+        "terminal_directory" => {
+            ctx.database
+                .categorize_terminal_directory(original_value, category)
+                .await
+        }
+        "editor_filename" => {
+            ctx.database
+                .categorize_editor_filename(original_value, category)
+                .await
+        }
+        "tmux_window_name" => {
+            ctx.database
+                .categorize_tmux_window_name(original_value, category)
+                .await
+        }
+        _ => {
+            ctx.database
+                .update_app_category(original_value, category)
+                .await
+        } // Fallback to app_name
     };
 
     if let Err(e) = result {
-        let error_msg = format!("[{}] Failed to update category for {}: {}", Local::now().format("%H:%M:%S"), unique_id, e);
+        let error_msg = format!(
+            "[{}] Failed to update category for {}: {}",
+            Local::now().format("%H:%M:%S"),
+            unique_id,
+            e
+        );
         ctx.logs.push(error_msg.clone());
         return Ok(CommandResult::success_no_refresh());
     }
@@ -164,28 +249,28 @@ pub async fn execute_update_category(
                 if session.app_name == original_value {
                     session.category = Some(category.to_string());
                 }
-            },
+            }
             "browser_page_title" => {
                 if session.browser_page_title.as_deref() == Some(original_value) {
                     session.browser_page_title_category = Some(category.to_string());
                 }
-            },
+            }
             "terminal_directory" => {
                 if session.terminal_directory.as_deref() == Some(original_value) {
                     session.terminal_directory_category = Some(category.to_string());
                 }
-            },
+            }
             "editor_filename" => {
                 if session.editor_filename.as_deref() == Some(original_value) {
                     session.editor_filename_category = Some(category.to_string());
                 }
-            },
+            }
             "tmux_window_name" => {
                 if session.tmux_window_name.as_deref() == Some(original_value) {
                     session.tmux_window_name_category = Some(category.to_string());
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
@@ -206,6 +291,12 @@ pub async fn execute_create_category(
     unique_id: &str,
     custom_category: &str,
 ) -> Result<CommandResult> {
+    if !ctx.database.is_writer() {
+        ctx.logs
+            .push("Recording is handled by another process; category creation skipped".to_string());
+        return Ok(CommandResult::success_no_refresh());
+    }
+
     if custom_category.is_empty() {
         return Ok(CommandResult::success_no_refresh());
     }

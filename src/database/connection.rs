@@ -1,7 +1,10 @@
-use anyhow::Result;
-use sqlx::postgres::PgPool;
-use sqlx::PgPool as Pool;
 use crate::models::session::Session;
+use anyhow::Result;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::PgPool;
+use sqlx::{PgPool as Pool, Postgres};
+
+const WRITER_LOCK_KEY: i64 = 0x485553544C455452;
 
 struct EmbeddedMigration {
     version: i64,
@@ -40,15 +43,37 @@ const MIGRATIONS: &[EmbeddedMigration] = &[
 /// PostgreSQL connection wrapper with embedded migrations and session CRUD.
 pub struct Database {
     pool: Pool,
+    // Holding this connection keeps the session-level advisory lock alive.
+    // PostgreSQL releases the lock automatically when the connection closes.
+    _writer_lock: Option<PoolConnection<Postgres>>,
+    is_writer: bool,
 }
 
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self> {
         let pool = PgPool::connect(database_url).await?;
 
-        Self::run_migrations(&pool).await?;
+        let mut lock_connection = pool.acquire().await?;
+        let is_writer: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(WRITER_LOCK_KEY)
+            .fetch_one(&mut *lock_connection)
+            .await?;
 
-        Ok(Self { pool })
+        if is_writer {
+            Self::run_migrations(&pool).await?;
+        } else {
+            log::info!("Another process owns the tracking writer lock; running read-only");
+        }
+
+        Ok(Self {
+            pool,
+            _writer_lock: is_writer.then_some(lock_connection),
+            is_writer,
+        })
+    }
+
+    pub fn is_writer(&self) -> bool {
+        self.is_writer
     }
 
     async fn run_migrations(pool: &Pool) -> Result<()> {
@@ -69,14 +94,14 @@ impl Database {
 
         for migration in MIGRATIONS {
             let already_applied: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = $1)"
+                "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = $1)",
             )
             .bind(migration.version)
             .fetch_one(pool)
             .await?;
 
             if !already_applied {
-                use sha2::{Sha256, Digest};
+                use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
                 hasher.update(migration.sql.as_bytes());
                 let checksum = hasher.finalize().to_vec();
@@ -98,7 +123,11 @@ impl Database {
                         .execute(pool)
                         .await?;
 
-                        log::info!("Applied migration: {} ({}ms)", migration.description, execution_time);
+                        log::info!(
+                            "Applied migration: {} ({}ms)",
+                            migration.description,
+                            execution_time
+                        );
                     }
                     Err(e) => {
                         sqlx::query(
@@ -114,7 +143,11 @@ impl Database {
                         .await
                         .ok();
 
-                        return Err(anyhow::anyhow!("Migration failed: {}: {}", migration.description, e));
+                        return Err(anyhow::anyhow!(
+                            "Migration failed: {}: {}",
+                            migration.description,
+                            e
+                        ));
                     }
                 }
             }
@@ -123,9 +156,13 @@ impl Database {
         Ok(())
     }
 
-
-
     pub async fn insert_session(&self, session: &Session) -> Result<i32> {
+        if !self.is_writer {
+            return Err(anyhow::anyhow!(
+                "database is read-only; another process owns recording"
+            ));
+        }
+
         let id: (i32,) = sqlx::query_as(
             r#"
             INSERT INTO sessions (
@@ -203,6 +240,87 @@ impl Database {
         Ok(id.0)
     }
 
+    pub async fn update_session(&self, session: &Session) -> Result<()> {
+        if !self.is_writer {
+            return Err(anyhow::anyhow!(
+                "database is read-only; another process owns recording"
+            ));
+        }
+
+        let id = session
+            .id
+            .ok_or_else(|| anyhow::anyhow!("cannot update a session without an id"))?;
+
+        sqlx::query(
+            r#"
+            UPDATE sessions SET
+                app_name = $1, window_name = $2, duration = $3, category = $4,
+                browser_url = $5, browser_page_title = $6, browser_notification_count = $7,
+                browser_page_title_renamed = $8, browser_page_title_category = $9,
+                terminal_username = $10, terminal_hostname = $11, terminal_directory = $12,
+                terminal_project_name = $13, terminal_directory_renamed = $14,
+                terminal_directory_category = $15,
+                editor_filename = $16, editor_filepath = $17, editor_project_path = $18,
+                editor_language = $19, editor_filename_renamed = $20,
+                editor_filename_category = $21,
+                tmux_window_name = $22, tmux_pane_count = $23, terminal_multiplexer = $24,
+                tmux_window_name_renamed = $25, tmux_window_name_category = $26,
+                ide_project_name = $27, ide_file_open = $28, ide_workspace = $29,
+                parsed_data = $30, parsing_success = $31, is_afk = $32, is_idle = $33,
+                idle_accumulation_secs = $34
+            WHERE id = $35
+            "#,
+        )
+        .bind(&session.app_name)
+        .bind(&session.window_name)
+        .bind(session.duration)
+        .bind(&session.category)
+        .bind(&session.browser_url)
+        .bind(&session.browser_page_title)
+        .bind(session.browser_notification_count)
+        .bind(&session.browser_page_title_renamed)
+        .bind(&session.browser_page_title_category)
+        .bind(&session.terminal_username)
+        .bind(&session.terminal_hostname)
+        .bind(&session.terminal_directory)
+        .bind(&session.terminal_project_name)
+        .bind(&session.terminal_directory_renamed)
+        .bind(&session.terminal_directory_category)
+        .bind(&session.editor_filename)
+        .bind(&session.editor_filepath)
+        .bind(&session.editor_project_path)
+        .bind(&session.editor_language)
+        .bind(&session.editor_filename_renamed)
+        .bind(&session.editor_filename_category)
+        .bind(&session.tmux_window_name)
+        .bind(session.tmux_pane_count)
+        .bind(&session.terminal_multiplexer)
+        .bind(&session.tmux_window_name_renamed)
+        .bind(&session.tmux_window_name_category)
+        .bind(&session.ide_project_name)
+        .bind(&session.ide_file_open)
+        .bind(&session.ide_workspace)
+        .bind(&session.parsed_data)
+        .bind(session.parsing_success)
+        .bind(session.is_afk)
+        .bind(session.is_idle)
+        .bind(session.idle_accumulation_secs)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn persist_session(&self, session: &Session) -> Result<i32> {
+        if let Some(id) = session.id {
+            self.update_session(session).await?;
+            Ok(id)
+        } else {
+            self.insert_session(session).await
+        }
+    }
+
     pub async fn get_recent_sessions(&self, limit: i64) -> Result<Vec<Session>> {
         let sessions = sqlx::query_as::<_, Session>(
             r#"
@@ -238,7 +356,12 @@ impl Database {
         Ok(rows)
     }
 
-    pub async fn rename_app_with_category(&self, old_name: &str, new_name: &str, category: &str) -> Result<()> {
+    pub async fn rename_app_with_category(
+        &self,
+        old_name: &str,
+        new_name: &str,
+        category: &str,
+    ) -> Result<()> {
         sqlx::query("UPDATE sessions SET app_name = $1, category = $2 WHERE app_name = $3")
             .bind(new_name)
             .bind(category)
@@ -258,43 +381,60 @@ impl Database {
     }
 
     pub async fn rename_browser_page_title(&self, old_title: &str, new_title: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET browser_page_title_renamed = $1 WHERE browser_page_title = $2")
-            .bind(new_title)
-            .bind(old_title)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET browser_page_title_renamed = $1 WHERE browser_page_title = $2",
+        )
+        .bind(new_title)
+        .bind(old_title)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn categorize_browser_page_title(&self, title: &str, category: &str) -> Result<()> {
-        let result = sqlx::query("UPDATE sessions SET browser_page_title_category = $1 WHERE browser_page_title = $2")
-            .bind(category)
-            .bind(title)
-            .execute(&self.pool)
-            .await?;
-        log::info!("Updated browser_page_title_category: title='{}', category='{}', rows_affected={}", title, category, result.rows_affected());
+        let result = sqlx::query(
+            "UPDATE sessions SET browser_page_title_category = $1 WHERE browser_page_title = $2",
+        )
+        .bind(category)
+        .bind(title)
+        .execute(&self.pool)
+        .await?;
+        log::info!(
+            "Updated browser_page_title_category: title='{}', category='{}', rows_affected={}",
+            title,
+            category,
+            result.rows_affected()
+        );
         Ok(())
     }
 
     pub async fn rename_terminal_directory(&self, old_dir: &str, new_dir: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET terminal_directory_renamed = $1 WHERE terminal_directory = $2")
-            .bind(new_dir)
-            .bind(old_dir)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET terminal_directory_renamed = $1 WHERE terminal_directory = $2",
+        )
+        .bind(new_dir)
+        .bind(old_dir)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn categorize_terminal_directory(&self, dir: &str, category: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET terminal_directory_category = $1 WHERE terminal_directory = $2")
-            .bind(category)
-            .bind(dir)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET terminal_directory_category = $1 WHERE terminal_directory = $2",
+        )
+        .bind(category)
+        .bind(dir)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    pub async fn rename_editor_filename(&self, old_filename: &str, new_filename: &str) -> Result<()> {
+    pub async fn rename_editor_filename(
+        &self,
+        old_filename: &str,
+        new_filename: &str,
+    ) -> Result<()> {
         sqlx::query("UPDATE sessions SET editor_filename_renamed = $1 WHERE editor_filename = $2")
             .bind(new_filename)
             .bind(old_filename)
@@ -313,39 +453,49 @@ impl Database {
     }
 
     pub async fn rename_tmux_window_name(&self, old_name: &str, new_name: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET tmux_window_name_renamed = $1 WHERE tmux_window_name = $2")
-            .bind(new_name)
-            .bind(old_name)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET tmux_window_name_renamed = $1 WHERE tmux_window_name = $2",
+        )
+        .bind(new_name)
+        .bind(old_name)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn categorize_tmux_window_name(&self, name: &str, category: &str) -> Result<()> {
-        sqlx::query("UPDATE sessions SET tmux_window_name_category = $1 WHERE tmux_window_name = $2")
-            .bind(category)
-            .bind(name)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE sessions SET tmux_window_name_category = $1 WHERE tmux_window_name = $2",
+        )
+        .bind(category)
+        .bind(name)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn get_app_category_by_name(&self, app_name: &str) -> Result<Option<String>> {
-        let category: Option<(String,)> = sqlx::query_as("SELECT category FROM sessions WHERE app_name = $1 AND category IS NOT NULL LIMIT 1")
-            .bind(app_name)
-            .fetch_optional(&self.pool)
-            .await?;
+        let category: Option<(String,)> = sqlx::query_as(
+            "SELECT category FROM sessions WHERE app_name = $1 AND category IS NOT NULL LIMIT 1",
+        )
+        .bind(app_name)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(category.map(|(c,)| c))
     }
 
-    pub async fn set_app_rename(&self, original_app_name: &str, renamed_app_name: &str) -> Result<()> {
+    pub async fn set_app_rename(
+        &self,
+        original_app_name: &str,
+        renamed_app_name: &str,
+    ) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO app_renames (original_app_name, renamed_app_name)
             VALUES ($1, $2)
             ON CONFLICT (original_app_name)
             DO UPDATE SET renamed_app_name = $2, updated_at = CURRENT_TIMESTAMP
-            "#
+            "#,
         )
         .bind(original_app_name)
         .bind(renamed_app_name)
@@ -356,16 +506,19 @@ impl Database {
 
     #[allow(dead_code)]
     pub async fn get_app_rename(&self, original_app_name: &str) -> Result<Option<String>> {
-        let rename: Option<(String,)> = sqlx::query_as(
-            "SELECT renamed_app_name FROM app_renames WHERE original_app_name = $1"
-        )
-        .bind(original_app_name)
-        .fetch_optional(&self.pool)
-        .await?;
+        let rename: Option<(String,)> =
+            sqlx::query_as("SELECT renamed_app_name FROM app_renames WHERE original_app_name = $1")
+                .bind(original_app_name)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(rename.map(|(r,)| r))
     }
 
     pub async fn fix_old_categories(&self) -> Result<()> {
+        if !self.is_writer {
+            return Ok(());
+        }
+
         // Fix any sessions with old category names that should be Development
         sqlx::query("UPDATE sessions SET category = $1 WHERE category IN ($2, $3)")
             .bind("💻 Development")
@@ -379,7 +532,12 @@ impl Database {
     pub async fn get_daily_usage(&self) -> Result<Vec<(String, i64)>> {
         // Get local midnight (start of today in local timezone)
         let now = chrono::Local::now();
-        let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap();
+        let today_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
 
         let rows: Vec<(String, Option<i64>)> = sqlx::query_as(
             "SELECT app_name, SUM(duration)::bigint as total_duration FROM sessions WHERE start_time >= $1 AND is_afk IS NOT TRUE AND is_idle IS NOT TRUE GROUP BY app_name ORDER BY total_duration DESC"
@@ -387,13 +545,21 @@ impl Database {
         .bind(today_start)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(app_name, total_duration)| (app_name, total_duration.unwrap_or(0))).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(app_name, total_duration)| (app_name, total_duration.unwrap_or(0)))
+            .collect())
     }
 
     pub async fn get_daily_sessions(&self) -> Result<Vec<Session>> {
         // Get local midnight (start of today in local timezone)
         let now = chrono::Local::now();
-        let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap();
+        let today_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
 
         let rows = sqlx::query_as::<_, Session>(
             r#"
@@ -423,7 +589,12 @@ impl Database {
     pub async fn get_weekly_sessions(&self) -> Result<Vec<Session>> {
         // Get local midnight 7 days ago (start of week in local timezone)
         let now = chrono::Local::now();
-        let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap();
+        let today_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
         let week_start = today_start - chrono::Duration::days(6);
 
         let rows = sqlx::query_as::<_, Session>(
@@ -454,7 +625,12 @@ impl Database {
     pub async fn get_monthly_sessions(&self) -> Result<Vec<Session>> {
         // Get local midnight 30 days ago (start of month in local timezone)
         let now = chrono::Local::now();
-        let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_local_timezone(chrono::Local).unwrap();
+        let today_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap();
         let month_start = today_start - chrono::Duration::days(29);
 
         let rows = sqlx::query_as::<_, Session>(
@@ -498,5 +674,3 @@ impl Database {
         Ok(categories.into_iter().map(|(c,)| c).collect())
     }
 }
-
-
