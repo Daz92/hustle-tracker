@@ -36,9 +36,29 @@ pub struct ParsedSessionData {
 impl ParsedSessionData {
     pub fn new() -> Self {
         Self {
-            parsing_success: true,
+            parsing_success: false,
             ..Default::default()
         }
+    }
+
+    fn has_extracted_field(&self) -> bool {
+        self.browser_url.is_some()
+            || self.browser_page_title.is_some()
+            || self.browser_notification_count.is_some()
+            || self.terminal_username.is_some()
+            || self.terminal_hostname.is_some()
+            || self.terminal_directory.is_some()
+            || self.terminal_project_name.is_some()
+            || self.editor_filename.is_some()
+            || self.editor_filepath.is_some()
+            || self.editor_project_path.is_some()
+            || self.editor_language.is_some()
+            || self.tmux_window_name.is_some()
+            || self.tmux_pane_count.is_some()
+            || self.terminal_multiplexer.is_some()
+            || self.ide_project_name.is_some()
+            || self.ide_file_open.is_some()
+            || self.ide_workspace.is_some()
     }
 }
 
@@ -49,15 +69,23 @@ pub fn parse_window_name(app_name: &str, window_name: &str) -> ParsedSessionData
     let app_lower = app_name.to_lowercase();
 
     // Route to appropriate parser based on app type
-    if is_browser(&app_lower) {
+    let parser_matched = if is_browser(&app_lower) {
         parse_browser(window_name, &mut parsed);
+        true
     } else if is_terminal(&app_lower) {
         parse_terminal(window_name, &mut parsed);
+        true
     } else if is_editor(&app_lower) {
         parse_editor(window_name, &mut parsed);
+        true
     } else if is_file_manager(&app_lower) {
         parse_file_manager(window_name, &mut parsed);
-    }
+        true
+    } else {
+        false
+    };
+
+    parsed.parsing_success = parser_matched && parsed.has_extracted_field();
 
     parsed
 }
@@ -70,6 +98,10 @@ fn is_browser(app_name: &str) -> bool {
     || app_name.contains("brave")
     || app_name.contains("safari")
     || app_name.contains("edge")
+    // Zen is matched by exact app name to avoid unrelated names such as zenity.
+    || app_name == "zen"
+    || app_name == "zen-browser"
+    || app_name == "zen_browser"
 }
 
 /// Check if app is a terminal
@@ -80,6 +112,9 @@ fn is_terminal(app_name: &str) -> bool {
     || app_name.contains("kitty")
     || app_name.contains("wezterm")
     || app_name.contains("konsole")
+    || app_name == "ghostty"
+    || app_name == "com.mitchellh.ghostty"
+    || app_name.contains("foot")
 }
 
 /// Check if app is an editor
@@ -119,10 +154,14 @@ fn parse_browser(window_name: &str, parsed: &mut ParsedSessionData) {
             }
 
     // Extract page title (remove browser name and notification count)
-    let title = window_name
+    let title_without_zen_suffix = window_name
+        .strip_suffix(" — Zen Browser")
+        .or_else(|| window_name.strip_suffix(" - Zen Browser"))
+        .unwrap_or(window_name);
+    let title = title_without_zen_suffix
         .split(" — ")
         .next()
-        .unwrap_or(window_name)
+        .unwrap_or(title_without_zen_suffix)
         .trim();
 
     // Remove notification count from title
@@ -135,6 +174,29 @@ fn parse_browser(window_name: &str, parsed: &mut ParsedSessionData) {
     } else {
         title
     };
+
+    // A browser's own name is not a page title (for example, when no page is open).
+    const BROWSER_SELF_NAMES: &[&str] = &[
+        "zen browser",
+        "mozilla firefox",
+        "firefox",
+        "google chrome",
+        "chrome",
+        "chromium",
+        "brave",
+        "safari",
+        "microsoft edge",
+        "edge",
+        "opera",
+        "vivaldi",
+    ];
+    if clean_title.is_empty()
+        || BROWSER_SELF_NAMES
+            .iter()
+            .any(|name| clean_title.eq_ignore_ascii_case(name))
+    {
+        return;
+    }
 
     parsed.browser_page_title = Some(clean_title.to_string());
 
@@ -542,6 +604,72 @@ mod tests {
         assert_eq!(parsed.browser_notification_count, Some(11));
         assert_eq!(parsed.browser_page_title, Some("WhatsApp Business".to_string()));
         assert_eq!(parsed.browser_url, Some("WhatsApp".to_string()));
+        assert!(parsed.parsing_success);
+    }
+
+    #[test]
+    fn test_parse_zen_browser_title() {
+        let parsed = parse_window_name(
+            "zen",
+            "adolfousier/hustle-tracker: An open-source time-tracking tool ... Built with Ratatui. — Zen Browser",
+        );
+
+        assert_eq!(
+            parsed.browser_page_title,
+            Some("adolfousier/hustle-tracker: An open-source time-tracking tool ... Built with Ratatui.".to_string())
+        );
+        assert!(parsed.parsing_success);
+    }
+
+    #[test]
+    fn test_parse_chrome_title() {
+        let parsed = parse_window_name("chrome", "GitHub — Google Chrome");
+
+        assert_eq!(parsed.browser_page_title, Some("GitHub".to_string()));
+        assert_eq!(parsed.browser_url, Some("GitHub".to_string()));
+        assert!(parsed.parsing_success);
+    }
+
+    #[test]
+    fn test_browser_self_names_are_not_page_titles() {
+        for (app_name, title) in [
+            ("zen", "Zen Browser"),
+            ("firefox", "Mozilla Firefox"),
+            ("chrome", "Google Chrome"),
+        ] {
+            let parsed = parse_window_name(app_name, title);
+
+            assert_eq!(parsed.browser_page_title, None);
+            assert!(!parsed.parsing_success);
+        }
+    }
+
+    #[test]
+    fn test_parse_zen_browser_search_title() {
+        let parsed = parse_window_name(
+            "zen",
+            "toggl track for linux - Google Search — Zen Browser",
+        );
+
+        assert_eq!(
+            parsed.browser_page_title,
+            Some("toggl track for linux - Google Search".to_string())
+        );
+        assert!(parsed.parsing_success);
+    }
+
+    #[test]
+    fn test_parse_zen_browser_pdf_title_verbatim() {
+        let parsed = parse_window_name(
+            "zen",
+            "TECHOP (D-07 - Rev1 - Jan21) PROVING FAULT RIDE-THROUGH CAPABILITY OF DP VESSELS.pdf — Zen Browser",
+        );
+
+        assert_eq!(
+            parsed.browser_page_title,
+            Some("TECHOP (D-07 - Rev1 - Jan21) PROVING FAULT RIDE-THROUGH CAPABILITY OF DP VESSELS.pdf".to_string())
+        );
+        assert!(parsed.parsing_success);
     }
 
     #[test]
@@ -555,6 +683,40 @@ mod tests {
         assert_eq!(parsed.terminal_hostname, Some("adolfo-ubuntu-pro25".to_string()));
         assert_eq!(parsed.terminal_directory, Some("/srv/rs/neura-hustle-tracker".to_string()));
         assert_eq!(parsed.terminal_project_name, Some("neura-hustle-tracker".to_string()));
+        assert!(parsed.parsing_success);
+    }
+
+    #[test]
+    fn test_parse_ghostty_command_title_is_not_success() {
+        let parsed = parse_window_name("ghostty", "herdr");
+
+        assert!(!parsed.parsing_success);
+        assert!(parsed.terminal_username.is_none());
+        assert!(parsed.terminal_hostname.is_none());
+        assert!(parsed.terminal_directory.is_none());
+    }
+
+    #[test]
+    fn test_parse_ghostty_title() {
+        let parsed = parse_window_name(
+            "com.mitchellh.ghostty",
+            "daz@omarchy:~/Shared/Repos/hustle-tracker",
+        );
+
+        assert_eq!(parsed.terminal_username, Some("daz".to_string()));
+        assert_eq!(parsed.terminal_hostname, Some("omarchy".to_string()));
+        assert!(parsed
+            .terminal_directory
+            .as_ref()
+            .is_some_and(|directory| directory.ends_with("/Shared/Repos/hustle-tracker")));
+        assert!(parsed.parsing_success);
+    }
+
+    #[test]
+    fn test_unknown_app_is_not_success() {
+        let parsed = parse_window_name("btop", "btop");
+
+        assert!(!parsed.parsing_success);
     }
 
     #[test]
