@@ -9,9 +9,17 @@ services:
       - "52851:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
+    restart: unless-stopped
     healthcheck:
+      # $$ escapes compose interpolation so the shell inside the container expands
+      # these from the container's own environment. Using ${POSTGRES_USERNAME} here
+      # would bake in an empty value whenever compose runs without the .env loaded,
+      # producing: pg_isready -U  -d hustle-tracker  ->  "too many command-line arguments"
       test:
-        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USERNAME} -d hustle-tracker"]
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER:-postgres}\" -d \"$${POSTGRES_DB:-hustle-tracker}\"",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
