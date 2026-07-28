@@ -27,6 +27,14 @@ help:
     @echo "  just db-down       - Stop PostgreSQL"
     @echo "  just clean         - Clean all build artifacts and stop DB"
     @echo ""
+    @echo "Fork Maintenance:"
+    @echo "  just sync-upstream - Fetch upstream, ff main, rebase branch, sync runtime config"
+    @echo "  just sync-runtime-compose - Copy compose.yml into the app data dir"
+    @echo ""
+    @echo "Fork Maintenance:"
+    @echo "  just sync-upstream - Fetch upstream, ff main, rebase branch, sync runtime config"
+    @echo "  just sync-runtime-compose - Copy repo compose.yml into the app data dir"
+    @echo ""
     @echo "Cleanup & Removal:"
     @echo "  just uninstall     - Remove app, database volume, and local directory"
     @echo ""
@@ -209,6 +217,101 @@ build-all-releases:
     @echo "  Linux:   just build-release-linux"
     @echo "  macOS:   just build-release-macos"
     @echo "  Windows: just build-release-windows"
+
+# DockerManager::ensure_compose_file only writes the runtime compose.yml when it is
+# ABSENT, so an existing install keeps a stale copy forever and upstream compose
+# fixes never take effect - not even after a full rebuild.
+# Copy compose.yml into the app data dir so the running config matches the repo
+sync-runtime-compose:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "$(uname)" = "Darwin" ]; then
+        data_dir="$HOME/Library/Application Support/hustle-tracker"
+    else
+        data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/hustle-tracker"
+    fi
+    runtime="$data_dir/compose.yml"
+    if [ ! -d "$data_dir" ]; then
+        echo "No data dir yet ($data_dir) - nothing to sync."
+        exit 0
+    fi
+    if [ -f "$runtime" ] && cmp -s compose.yml "$runtime"; then
+        echo "✓ Runtime compose.yml already matches the repo."
+        exit 0
+    fi
+    if [ -f "$runtime" ]; then
+        cp "$runtime" "$runtime.bak.$(date +%s)"
+        echo "Backed up previous runtime compose.yml"
+    fi
+    cp compose.yml "$runtime"
+    echo "✓ Synced compose.yml -> $runtime"
+    echo ""
+    echo "⚠️  The running container still uses the OLD config. Apply it with:"
+    echo "      docker compose up -d --force-recreate"
+    echo "    (no -v: that would delete your tracked data)"
+
+# Fetch upstream, fast-forward main, rebase the current topic branch, re-sync runtime config.
+sync-upstream:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if ! git remote get-url upstream >/dev/null 2>&1; then
+        echo "No 'upstream' remote configured. Add it with:"
+        echo "  git remote add upstream https://github.com/adolfousier/hustle-tracker"
+        exit 1
+    fi
+
+    # A rebase over a dirty tree loses work. Refuse rather than stash implicitly.
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        echo "✗ Working tree has uncommitted changes. Commit or stash first:"
+        git status --short
+        exit 1
+    fi
+
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    echo "Fetching upstream..."
+    git fetch upstream
+
+    behind="$(git rev-list --count HEAD..upstream/main)"
+    if [ "$behind" = "0" ]; then
+        echo "✓ Already up to date with upstream/main."
+    else
+        echo "upstream/main has $behind new commit(s):"
+        git log --oneline --no-decorate "HEAD..upstream/main" | head -20
+    fi
+
+    echo ""
+    echo "Fast-forwarding main..."
+    git checkout main
+    if ! git merge --ff-only upstream/main; then
+        echo "✗ main has diverged from upstream/main."
+        echo "  Keep main a pure mirror; put your changes on a topic branch."
+        git checkout "$branch"
+        exit 1
+    fi
+
+    if [ "$branch" = "main" ]; then
+        echo "✓ On main; nothing to rebase."
+    else
+        echo ""
+        echo "Rebasing $branch onto upstream/main..."
+        git checkout "$branch"
+        if ! git rebase upstream/main; then
+            echo ""
+            echo "✗ Rebase hit conflicts. compose.yml is the usual culprit."
+            echo "  Resolve, then: git rebase --continue"
+            echo "  Or bail out:   git rebase --abort"
+            exit 1
+        fi
+    fi
+
+    echo ""
+    just sync-runtime-compose
+
+    echo ""
+    echo "Next: rebuild so the binaries match the new source"
+    echo "  cargo build --release --bin hustle_tracker --bin hustle_daemon"
+    echo "  just daemon-stop && just daemon-start"
 
 uninstall:
     #!/usr/bin/env bash
