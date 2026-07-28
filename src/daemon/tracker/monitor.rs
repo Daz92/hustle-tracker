@@ -89,6 +89,9 @@ impl AppMonitor {
         Self { use_wayland, use_hyprland }
     }
 
+    pub fn uses_wayland(&self) -> bool {
+        self.use_wayland
+    }
 
     fn is_wayland() -> bool {
         #[cfg(target_os = "linux")]

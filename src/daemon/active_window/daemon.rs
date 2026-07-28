@@ -18,6 +18,7 @@ pub struct Daemon {
     current_window: Option<String>,
     current_session: Option<Session>,
     last_input: Arc<Mutex<DateTime<Local>>>,
+    user_active: Option<Arc<AtomicBool>>,
 }
 
 impl Daemon {
@@ -25,8 +26,7 @@ impl Daemon {
         let monitor = AppMonitor::new();
         let last_input = Arc::new(Mutex::new(Local::now()));
 
-        // Start input monitoring thread
-        Self::start_input_monitoring(Arc::clone(&last_input));
+        let user_active = Self::start_input_monitoring(Arc::clone(&last_input), &monitor);
 
         Self {
             database,
@@ -35,11 +35,42 @@ impl Daemon {
             current_window: None,
             current_session: None,
             last_input,
+            user_active,
         }
     }
 
+    fn start_input_monitoring(
+        last_input: Arc<Mutex<DateTime<Local>>>,
+        monitor: &AppMonitor,
+    ) -> Option<Arc<AtomicBool>> {
+        if monitor.uses_wayland() {
+            #[cfg(target_os = "linux")]
+            {
+                match crate::daemon::tracker::idle_wayland::start() {
+                    Ok(user_active) => {
+                        log::info!("Input backend selected: Wayland ext-idle-notify-v1");
+                        return Some(user_active);
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Wayland idle backend unavailable ({error}); falling back to rdev input monitoring"
+                        );
+                    }
+                }
+            }
+        } else {
+            log::info!("Input backend selected: rdev (X11/non-Wayland)");
+        }
+
+        if monitor.uses_wayland() {
+            log::info!("Input backend selected: rdev (Wayland fallback)");
+        }
+        Self::start_rdev_input_monitoring(last_input);
+        None
+    }
+
     // Input monitoring using rdev
-    fn start_input_monitoring(last_input: Arc<Mutex<DateTime<Local>>>) {
+    fn start_rdev_input_monitoring(last_input: Arc<Mutex<DateTime<Local>>>) {
         std::thread::spawn(move || {
             let callback = move |event: rdev::Event| match event.event_type {
                 EventType::KeyPress(_)
@@ -56,6 +87,15 @@ impl Daemon {
                 eprintln!("Error listening for input events in daemon: {:?}", error);
             }
         });
+    }
+
+    fn refresh_last_input_if_active(
+        user_active: Option<&AtomicBool>,
+        last_input: &Arc<Mutex<DateTime<Local>>>,
+    ) {
+        if user_active.is_some_and(|active| active.load(Ordering::Relaxed)) {
+            *last_input.lock().unwrap() = Local::now();
+        }
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -92,6 +132,7 @@ impl Daemon {
 
             // Check for AFK status every second
             if last_afk_check.elapsed() >= afk_check_interval {
+                Self::refresh_last_input_if_active(self.user_active.as_deref(), &self.last_input);
                 let idle_duration =
                     Local::now().signed_duration_since(*self.last_input.lock().unwrap());
                 let is_currently_afk =
@@ -156,14 +197,30 @@ impl Daemon {
                         // Start new session with updated AFK state
                         if is_currently_afk {
                             // Starting AFK session
+                            let resume_app = self.current_app.clone();
+                            let resume_window = self.current_window.clone();
                             self.switch_app(
                                 "AFK".to_string(),
                                 Some("Away from keyboard".to_string()),
                             )
                             .await?;
-                            if let Some(ref mut new_session) = self.current_session {
+                            if let Some(mut new_session) = self.current_session.take() {
                                 new_session.is_afk = Some(true);
+                                match self.database.persist_session(&new_session).await {
+                                    Ok(id) => new_session.id = Some(id),
+                                    Err(e) => log::error!(
+                                        "Failed to create AFK session row for update-on-resume: {}",
+                                        e
+                                    ),
+                                }
+                                self.current_session = Some(new_session);
                             }
+
+                            // Keep the last real app/window as the comparison baseline while
+                            // AFK. The focused window itself does not change merely because
+                            // the daemon entered AFK.
+                            self.current_app = resume_app;
+                            self.current_window = resume_window;
                         } else {
                             // Returning from AFK - get the actual active app
                             if let Ok((active_app, active_window)) =
@@ -182,7 +239,7 @@ impl Daemon {
                 last_afk_check = tokio::time::Instant::now();
             }
 
-            // Check for app or window change (but not if we're AFK)
+            // Check for app or window changes, including the AFK safety net.
             if let Ok((active_app, active_window)) =
                 self.monitor.get_active_window_info_async().await
             {
@@ -197,10 +254,26 @@ impl Daemon {
                     active_window
                 );
 
-                // Only track app changes if not AFK
-                if self.database.is_writer() && !is_currently_afk {
+                if self.database.is_writer() {
                     // Check if app or window changed
-                    if active_app != self.current_app || active_window != self.current_window {
+                    let app_or_window_changed =
+                        active_app != self.current_app || active_window != self.current_window;
+
+                    if app_or_window_changed && is_currently_afk {
+                        // A real focused-window change is an independent safety net for idle
+                        // backends. It proves user activity, so close the AFK row through
+                        // persist_session (which updates because the AFK row has an id), then
+                        // resume normal tracking immediately.
+                        log::info!(
+                            "App/window change observed while AFK; treating it as user activity and resuming tracking"
+                        );
+                        *self.last_input.lock().unwrap() = Local::now();
+                        self.switch_app(active_app.clone(), active_window.clone())
+                            .await?;
+                        if let Some(ref mut session) = self.current_session {
+                            session.is_afk = Some(false);
+                        }
+                    } else if app_or_window_changed {
                         log::info!(
                             "App change detected: '{}' -> '{}', window: '{:?}' -> '{:?}'",
                             self.current_app,
@@ -532,5 +605,29 @@ mod tests {
         assert_eq!(session_duration_before_sleep, 3600);
 
         println!("AFK session creation logic test passed");
+    }
+
+    #[test]
+    fn test_wayland_active_flag_refreshes_last_input() {
+        let last_input = Arc::new(Mutex::new(Local::now() - chrono::Duration::seconds(30)));
+        let user_active = AtomicBool::new(true);
+
+        Daemon::refresh_last_input_if_active(Some(&user_active), &last_input);
+
+        assert!(
+            Local::now().signed_duration_since(*last_input.lock().unwrap())
+                < chrono::Duration::seconds(2)
+        );
+    }
+
+    #[test]
+    fn test_wayland_idle_flag_does_not_refresh_last_input() {
+        let original = Local::now() - chrono::Duration::seconds(30);
+        let last_input = Arc::new(Mutex::new(original));
+        let user_active = AtomicBool::new(false);
+
+        Daemon::refresh_last_input_if_active(Some(&user_active), &last_input);
+
+        assert!(*last_input.lock().unwrap() <= original);
     }
 }
